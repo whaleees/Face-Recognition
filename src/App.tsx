@@ -1,208 +1,304 @@
-import { useState, useRef, useEffect } from 'react';
-import Webcam from 'react-webcam';
-import  supabase  from '../utils/supabase';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-
 const App = () => {
-  const [userName, setUserName] = useState('');
+  const [email, setEmail] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
+  const [success, setSuccess] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedCamera, setSelectedCamera] = useState('');
-  const webcamRef = useRef<Webcam>(null);
+  const [hasCameraPermission, setHasCameraPermission] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const navigate = useNavigate();
 
-
-  // Get available cameras
   useEffect(() => {
-    const getCameras = async () => {
+    const initializeCameraDevices = async () => {
       try {
+        const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        tempStream.getTracks().forEach((track) => track.stop());
+
         const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        const videoDevices = devices.filter((d) => d.kind === 'videoinput');
         setCameraDevices(videoDevices);
         if (videoDevices.length > 0) {
           setSelectedCamera(videoDevices[0].deviceId);
         }
+        setHasCameraPermission(true);
       } catch (err) {
-        console.error('Camera enumeration failed:', err);
+        console.error('Camera initialization failed:', err);
+        setError('Camera access is required for this feature');
       }
     };
-    getCameras();
+
+    initializeCameraDevices();
   }, []);
 
-  // Initialize camera with selected device
-  const initializeCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          deviceId: selectedCamera,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      });
-      
-      if (webcamRef.current?.video) {
-        webcamRef.current.video.srcObject = stream;
-        setCameraReady(true);
-      }
-    } catch (err) {
-      handleCameraError(err);
-    }
-  };
+  useEffect(() => {
+    let mediaStream: MediaStream | null = null;
 
-  const handleCameraError = (error: unknown) => {
-    let message = 'Camera access denied';
-    if (error instanceof DOMException) {
-      switch (error.name) {
-        case 'NotAllowedError':
-          message = 'Please allow camera access in browser settings';
-          break;
-        case 'NotFoundError':
-          message = 'No camera device found';
-          break;
-        case 'NotReadableError':
-          message = 'Camera is already in use';
-          break;
+    const startCamera = async () => {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: selectedCamera ? { exact: selectedCamera } : undefined }
+        });
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = mediaStream;
+          await videoRef.current.play();
+        }
+        setStream(mediaStream);
+      } catch (err: any) {
+        console.error('Camera error:', err);
+        let message = 'Camera access denied';
+        if (err.name === 'NotAllowedError') message = 'Please allow camera access';
+        else if (err.name === 'NotFoundError') message = 'No camera detected';
+        else if (err.name === 'NotReadableError') message = 'Camera already in use';
+        setError(message);
+        setIsScanning(false);
       }
+    };
+
+    if (isScanning && selectedCamera) {
+      startCamera();
     }
-    setError(message);
-    setCameraReady(false);
-  };
+
+    return () => {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        setStream(null);
+      }
+    };
+  }, [isScanning, selectedCamera]);
 
   const capturePhoto = async (): Promise<Blob> => {
-    if (!webcamRef.current || !cameraReady) {
-      throw new Error('Camera not ready');
-    }
-
-    const imageSrc = webcamRef.current.getScreenshot();
-    if (!imageSrc) throw new Error('Failed to capture photo');
-
-    const response = await fetch(imageSrc);
-    return response.blob();
+    if (!videoRef.current) throw new Error('Camera not ready');
+    const canvas = document.createElement('canvas');
+    canvas.width = videoRef.current.videoWidth;
+    canvas.height = videoRef.current.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Failed to get canvas context');
+    ctx.drawImage(videoRef.current, 0, 0);
+    
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+      }, 'image/jpeg');
+    });
   };
 
-  const handleSaveEmbedding = async () => {
-    setLoading(true);
-    setError('');
+  const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+
+    if (!email) {
+      setError('Email is required');
+      return;
+    }
+    if (!validateEmail(email)) {
+      setError('Please enter a valid email address');
+      return;
+    }
+
+    setIsScanning(true);
+  };
+
+  const handleFaceOperation = async () => {
     try {
-      if (!userName) throw new Error('Please enter your name');
-      if (!cameraReady) throw new Error('Camera not initialized');
+      setIsLoading(true);
+      setError('');
+      setSuccess('');
 
       const photoBlob = await capturePhoto();
       const formData = new FormData();
       formData.append('image', photoBlob, 'face.jpg');
-      formData.append('email', userName);
 
-      const response = await fetch('http://localhost:5000/register', {
-        method: 'POST',
-        body: formData
-      });
+      if (!email) throw new Error('Please enter your email first');
+      formData.append('email', email.trim().toLowerCase());
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Registration failed');
-      }
+      const response = await fetch(
+        `http://localhost:5000${isRegistering ? '/register' : '/recognize'}`,
+        { method: 'POST', body: formData }
+      );
 
-      navigate('/dashboard'); 
-      setUserName('');
-    } catch (err) {
-      if (err instanceof Error) {
-        setError(err.message);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Operation failed');
+
+      if (isRegistering) {
+        setSuccess('Registration successful!');
+        setTimeout(() => {
+          setIsRegistering(false);
+          setSuccess('');
+        }, 3000);
       } else {
-        setError('An unknown error occurred');
+        if (data.result && data.result !== 'Unknown') {
+          setIsAuthenticated(true);
+        } else {
+          setError('Face not recognized');
+        }
       }
+    } catch (err: any) {
+      setError(err.message);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
+      setIsScanning(false);
     }
   };
 
+  const resetForm = () => {
+    setEmail('');
+    setIsScanning(false);
+    setIsAuthenticated(false);
+    setIsRegistering(false);
+    setError('');
+    setSuccess('');
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      setStream(null);
+    }
+  };
+
+  if (isAuthenticated) {
+    navigate('/dashboard');
+  }
+
   return (
-    <div className="container mx-auto p-4 max-w-2xl">
-      <h1 className="text-3xl font-bold mb-6 text-center">Face Registration</h1>
-      
-      <div className="bg-white rounded-lg shadow-lg p-6">
-        {/* Camera Selection */}
-        <div className="mb-4">
-          <label className="block mb-2 font-medium">
-            Select Camera:
-            <select
-              value={selectedCamera}
-              onChange={(e) => setSelectedCamera(e.target.value)}
-              className="ml-2 p-2 border rounded"
-            >
-              {cameraDevices.map(device => (
-                <option key={device.deviceId} value={device.deviceId}>
-                  {device.label || `Camera ${device.deviceId.slice(0, 5)}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            onClick={initializeCamera}
-            className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-          >
-            {cameraReady ? 'Reinitialize Camera' : 'Start Camera'}
-          </button>
+    <div className="min-h-screen flex items-center justify-center p-4 w-screen overflow-hidden">
+      <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <i className="fas fa-user-shield text-blue-600 text-2xl"></i>
+          </div>
+          <h1 className="text-2xl font-bold text-gray-800">
+            {isRegistering ? 'Create Account' : 'Secure Login'}
+          </h1>
+          <p className="text-gray-600">
+            {isRegistering ? 'Register with your email and face' : 'Use your email and face recognition'}
+          </p>
         </div>
 
-        {/* Webcam Preview */}
-        {cameraReady ? (
-          <div className="mb-4 relative">
-            <Webcam
-              ref={webcamRef}
-              audio={false}
-              screenshotFormat="image/jpeg"
-              videoConstraints={{
-                deviceId: selectedCamera,
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
-              }}
-              className="rounded-lg border-2 border-gray-200"
-              style={{ transform: 'scaleX(-1)' }}
-            />
-          </div>
+        {!isScanning ? (
+          <form onSubmit={handleSubmit}>
+            <div className="mb-6">
+              <label htmlFor="email" className="block text-gray-700 text-sm font-medium mb-2">
+                Email Address
+              </label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <i className="fas fa-envelope text-gray-400"></i>
+                </div>
+                <input
+                  type="email"
+                  id="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="your@email.com"
+                />
+              </div>
+              {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+              {success && <p className="mt-2 text-sm text-green-600">{success}</p>}
+            </div>
+
+            {cameraDevices.length > 0 && (
+              <div className="mb-4">
+                <label className="block text-gray-700 text-sm font-medium mb-2">
+                  Select Camera:
+                  <select
+                    value={selectedCamera}
+                    onChange={(e) => setSelectedCamera(e.target.value)}
+                    className="ml-2 p-2 border rounded"
+                  >
+                    {cameraDevices.map((device) => (
+                      <option key={device.deviceId} value={device.deviceId}>
+                        {device.label || `Camera ${device.deviceId.slice(0, 5)}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 flex items-center justify-center"
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <i className="fas fa-spinner fa-spin mr-2"></i>
+              ) : (
+                <i className={`fas ${isRegistering ? 'fa-user-plus' : 'fa-sign-in-alt'} mr-2`}></i>
+              )}
+              {isRegistering ? 'Register' : 'Continue'} with Face Recognition
+            </button>
+
+            <div className="mt-4 text-center">
+              <button
+                type="button"
+                onClick={() => setIsRegistering(!isRegistering)}
+                className="text-blue-600 hover:text-blue-800 text-sm"
+              >
+                {isRegistering ? 'Already have an account? Login here' : 'Need an account? Register here'}
+              </button>
+            </div>
+          </form>
         ) : (
-          <div className="mb-4 p-4 bg-yellow-100 rounded-lg">
-            {error || 'Camera not initialized. Click "Start Camera" above.'}
+          <div className="text-center">
+            <div className="mb-6">
+              <h2 className="text-xl font-semibold text-gray-800 mb-2">
+                {isRegistering ? 'Face Registration' : 'Face Recognition'}
+              </h2>
+              <p className="text-gray-600">Please look directly at your camera</p>
+            </div>
+
+            <div className="relative mb-6">
+              <div className="w-full h-full rounded-xl border-4 border-blue-500 overflow-hidden">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
+                  style={{ transform: 'scaleX(-1)' }}
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={handleFaceOperation}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 flex items-center justify-center"
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <i className="fas fa-spinner fa-spin mr-2"></i>
+              ) : (
+                <i className={`fas ${isRegistering ? 'fa-user-plus' : 'fa-sign-in-alt'} mr-2`}></i>
+              )}
+              {isRegistering ? 'Register Face' : 'Recognize Face'}
+            </button>
+
+            {success && (
+              <div className="mt-4 p-3 bg-green-100 text-green-700 rounded-lg">{success}</div>
+            )}
+            {error && (
+              <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-lg">{error}</div>
+            )}
+
+            <button
+              onClick={resetForm}
+              className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-3 px-4 rounded-lg transition duration-200"
+            >
+              <i className="fas fa-arrow-left mr-2"></i> Go Back
+            </button>
           </div>
         )}
-
-        {/* Registration Form */}
-        <div className="mb-4">
-          <label className="block mb-2 font-medium">
-            Your Name:
-            <input
-              type="text"
-              value={userName}
-              onChange={(e) => setUserName(e.target.value)}
-              className="ml-2 p-2 border rounded w-full"
-              placeholder="Enter your name"
-            />
-          </label>
-        </div>
-
-        {error && <div className="mb-4 p-3 bg-red-100 text-red-700 rounded-lg">{error}</div>}
-
-        <button
-          onClick={handleSaveEmbedding}
-          disabled={!cameraReady || loading}
-          className="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600 disabled:bg-gray-400 transition-colors"
-        >
-          {loading ? (
-            <span className="flex items-center justify-center">
-              <svg className="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="10" fill="none" strokeWidth="4" className="opacity-25"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/>
-              </svg>
-              Processing...
-            </span>
-          ) : (
-            'Register Face'
-          )}
-        </button>
       </div>
     </div>
   );
