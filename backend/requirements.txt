@@ -1,0 +1,8 @@
+supabase
+facenet-pytorch
+opencv-python
+torch
+numpy
+scikit-learn
+flask 
+flask-cors
